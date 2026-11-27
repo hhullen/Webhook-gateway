@@ -26,7 +26,7 @@ type ILogger interface {
 	InfoKV(message string, argsKV ...any)
 	// WarnKV(message string, argsKV ...any)
 	ErrorKV(message string, argsKV ...any)
-	// FatalKV(message string, argsKV ...any)
+	FatalKV(message string, argsKV ...any)
 }
 
 type ILimiter interface {
@@ -34,8 +34,13 @@ type ILimiter interface {
 }
 
 type IWebhookGatewayService interface {
-	StartSession(conn io.ReadWriteCloser, authToken, tunnelId string) error
-	OpenStream(tunnelId string) (io.ReadWriteCloser, error)
+	StartSession(conn io.ReadWriteCloser, tunnelId string) bool
+	OpenStream(tunnelId string) (io.ReadWriteCloser, bool)
+	Stop(ctx context.Context)
+}
+
+type IAuthService interface {
+	VerifyAuthToken(authTocken string) (bool, error)
 }
 
 type ResponseWriterInterceptor struct {
@@ -57,15 +62,18 @@ func (rwi *ResponseWriterInterceptor) WriteHeader(statusCode int) {
 }
 
 type API struct {
-	logger  ILogger
-	limiter ILimiter
-	server  IServer
-	router  IRouter
-	service IWebhookGatewayService
+	logger    ILogger
+	limiter   ILimiter
+	server    IServer
+	router    IRouter
+	whService IWebhookGatewayService
+	auth      IAuthService
 }
 
 func NewAPI(
 	address string,
+	wh IWebhookGatewayService,
+	auth IAuthService,
 	lim ILimiter,
 	log ILogger) (*API, error) {
 	router := http.NewServeMux()
@@ -77,19 +85,23 @@ func NewAPI(
 		WriteTimeout: writeTimeout,
 	}
 
-	return buildAPI(log, lim, server, router), nil
+	return buildAPI(wh, auth, log, lim, server, router), nil
 }
 
 func buildAPI(
+	wh IWebhookGatewayService,
+	auth IAuthService,
 	log ILogger,
 	lim ILimiter,
 	srv IServer,
 	rou IRouter) *API {
 	api := &API{
-		logger:  log,
-		limiter: lim,
-		server:  srv,
-		router:  rou,
+		whService: wh,
+		auth:      auth,
+		logger:    log,
+		limiter:   lim,
+		server:    srv,
+		router:    rou,
 	}
 
 	api.setupWebsocketHandlers()
@@ -105,6 +117,7 @@ func (a *API) StartListening() error {
 
 func (a *API) Stop(ctx context.Context) error {
 	a.logger.InfoKV("Server Shutdown")
+	a.whService.Stop(ctx)
 	return a.server.Shutdown(ctx)
 }
 
