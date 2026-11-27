@@ -2,36 +2,26 @@ package api
 
 import (
 	"bufio"
-	"fmt"
+	"net"
 	"net/http"
-	ds "webhook-gateway/internal/datastruct"
+	"os"
+	"strings"
 )
 
 func (a *API) setupWebhookHandlers() {
-	a.router.Handle("/wh/{tunnel_id}/{rest...}", http.HandlerFunc(a.serveWebhook))
+	a.router.Handle("/", http.HandlerFunc(a.serveWebhook))
 }
 
 func (a *API) serveWebhook(w http.ResponseWriter, r *http.Request) {
-	tunnelId := r.PathValue("tunnel_id")
-	if tunnelId == "" {
-		http.Error(w, "tunnel id required", http.StatusInternalServerError)
+	tunnelId, extracted := a.extractTunnelIdFromHost(r.Host)
+	if !extracted {
+		http.Error(w, "tunnel id is incorrect or not provided", http.StatusInternalServerError)
 		return
 	}
 
-	cleanPath := fmt.Sprintf("/%s", r.PathValue("rest"))
-	r.URL.Path = cleanPath
-	r.URL.RawPath = ""
-
-	stream, err := a.service.OpenStream(tunnelId)
-	if err != nil {
-		if err == ds.ErrIncorrectTunnelId {
-			http.Error(w, "incorrect tunnel id", http.StatusBadRequest)
-			return
-		}
-
-		const msg = "failed opening client-server stream"
-		a.logger.ErrorKV(msg, "error", err)
-		http.Error(w, msg, http.StatusInternalServerError)
+	stream, opened := a.whService.OpenStream(tunnelId)
+	if !opened {
+		http.Error(w, "failed opening client-server stream", http.StatusInternalServerError)
 		return
 	}
 
@@ -53,4 +43,38 @@ func (a *API) serveWebhook(w http.ResponseWriter, r *http.Request) {
 	if err := resp.Write(w); err != nil {
 		a.logger.ErrorKV("failed writing response", "error", err)
 	}
+}
+
+func (a *API) extractTunnelIdFromHost(host string) (string, bool) {
+	host, _, err := net.SplitHostPort(host)
+	if err != nil {
+		a.logger.ErrorKV("failed splitting host:port", "error", err)
+		return "", false
+	}
+
+	host = strings.ToLower(strings.TrimSpace(host))
+
+	baseDomain := os.Getenv("BASE_DOMAIN")
+	if baseDomain == "" {
+		a.logger.FatalKV("base bomain not provided",
+			"error", "empty base domain", "requirement", "set BASE_DOMAIN environment variable")
+		return "", false
+	}
+
+	suffix := baseDomain
+	if baseDomain[0] != '.' {
+		suffix = "." + baseDomain
+	}
+
+	tunnelId, found := strings.CutSuffix(host, suffix)
+	if !found || tunnelId == "" {
+		a.logger.ErrorKV("not found tunnel id")
+		return "", false
+	}
+
+	if strings.Contains(tunnelId, ".") {
+		return "", false
+	}
+
+	return tunnelId, true
 }
